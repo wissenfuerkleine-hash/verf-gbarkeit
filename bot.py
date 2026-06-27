@@ -11,7 +11,7 @@ USER_NEED_HELP_ROLE_ID = 1514285810889916426  # User / Bürger braucht Hilfe
 TEAM_ROLE_ID = 1515119690219786250            # Support-Teammitglied
 
 # KANÄLE
-WARTERAUM_ID = 1512120421007495248            # Nur hier wird die Wartezeit gemessen!
+WARTERAUM_ID = 1512120421007495248            
 VOICE_CHANNEL_IDS = [
     1512122067099844678,
     1512122115732668566,
@@ -22,32 +22,41 @@ VOICE_CHANNEL_IDS = [
 
 PANEL_TEXT_CHANNEL_ID = 1520166885650333798
 
-intents = discord.Intents.default()
-intents.voice_states = True
-intents.members = True
-intents.guilds = True
+# HIER ALLE INTENTS ERZWINGEN (WICHTIG FÜR DIE ROLLEN-ERKENNUNG IM VOICE)
+intents = discord.Intents.all() 
 
 bot = discord.Client(intents=intents)
 
 panel_message: discord.Message | None = None
-last_state_hash = ""  # Für das intelligente Caching
+last_state_hash = ""  
 
 
 def get_channel_status(channel: discord.VoiceChannel) -> str:
     """Ermittelt den Status eines einzelnen Support-Kanals anhand der Rollen."""
-    has_team = any(any(r.id == TEAM_ROLE_ID for r in m.roles) for m in channel.members)
-    has_user = any(any(r.id == USER_NEED_HELP_ROLE_ID for r in m.roles) for m in channel.members)
+    # Wir stellen sicher, dass wir die echten, aktuellen Member im Sprachkanal prüfen
+    has_team = False
+    has_user = False
+
+    for member in channel.members:
+        # Sicherstellen, dass die Rollen des Members geladen sind
+        member_roles = [r.id for r in member.roles]
+        
+        if TEAM_ROLE_ID in member_roles:
+            has_team = True
+        if USER_NEED_HELP_ROLE_ID in member_roles:
+            has_user = True
     
     if has_team and has_user:
         return "🔴 Besetzt (Bürger drin)"
     elif has_team:
         return "🟢 Frei (Teamler drin)"
+    elif has_user:
+        return "🔴 Besetzt (Bürger drin)"  # Falls ein Bürger alleine reinschlüpft, ist er auch besetzt!
     else:
         return "⚪ Unbesetzt (Niemand drin)"
 
 
 def calculate_warteraum_wait_time(guild: discord.Guild) -> str:
-    """Berechnet die durchschnittliche Wartezeit NUR für den Warteraum."""
     warteraum = guild.get_channel(WARTERAUM_ID)
     if not warteraum or not warteraum.members:
         return "0 Minuten"
@@ -57,15 +66,13 @@ def calculate_warteraum_wait_time(guild: discord.Guild) -> str:
     count = 0
     
     for member in warteraum.members:
-        # Wir messen nur Bürger im Warteraum
-        if any(r.id == USER_NEED_HELP_ROLE_ID for r in member.roles):
+        member_roles = [r.id for r in member.roles]
+        if USER_NEED_HELP_ROLE_ID in member_roles:
             join_time = None
             if member.voice:
                 if hasattr(member.voice, 'requested_to_speak_at') and member.voice.requested_to_speak_at:
                     join_time = member.voice.requested_to_speak_at
             
-            # Fallback für normale Voice-Channels: 
-            # Wenn kein genauer Timestamp existiert, rechnen wir mit 2 Minuten pro wartendem User.
             if not join_time:
                 join_time = now - datetime.timedelta(minutes=2)
                 
@@ -88,7 +95,6 @@ def build_embed(guild: discord.Guild, lines: list, any_team_online: bool) -> dis
         ampel = "🔴 OFFLINE — Zurzeit kein Supporter im Dienst"
         color = discord.Color.red()
 
-    # Berechne Werte für den Warteraum
     avg_wait = calculate_warteraum_wait_time(guild)
     warteraum = guild.get_channel(WARTERAUM_ID)
     warteraum_count = len(warteraum.members) if warteraum else 0
@@ -138,9 +144,10 @@ async def find_or_create_panel():
         lines.append(f"**{channel.name}** — {status}")
         state_str += f"{ch_id}:{status}|"
         
-        # Ein Teamler ist im Dienst, wenn ein Kanal "Frei" (Teamler drin) oder "Besetzt" (Teamler + Bürger) ist
-        if "🟢 Frei" in status or "🔴 Besetzt" in status:
-            any_team_online = True
+        if "🟢 Frei" in status or "Besetzt" in status:
+            # Wenn ein Teamler da ist, gilt das Team als Online
+            if any(TEAM_ROLE_ID in [r.id for r in m.roles] for m in channel.members):
+                any_team_online = True
 
     warteraum = guild.get_channel(WARTERAUM_ID)
     state_str += f"w:{len(warteraum.members) if warteraum else 0}"
@@ -187,14 +194,14 @@ async def update_panel():
             lines.append(f"**{channel.name}** — {status}")
             state_str += f"{ch_id}:{status}|"
 
-            if "🟢 Frei" in status or "🔴 Besetzt" in status:
-                any_team_online = True
+            if "🟢 Frei" in status or "Besetzt" in status:
+                if any(TEAM_ROLE_ID in [r.id for r in m.roles] for m in channel.members):
+                    any_team_online = True
 
         warteraum = guild.get_channel(WARTERAUM_ID)
         warteraum_count = len(warteraum.members) if warteraum else 0
         state_str += f"w:{warteraum_count}"
 
-        # INTELLIGENTES CACHING: Nur editieren, wenn sich optisch wirklich etwas geändert hat!
         if state_str == last_state_hash:
             return
 
