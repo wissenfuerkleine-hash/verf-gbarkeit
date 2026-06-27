@@ -22,7 +22,7 @@ const client = new Client({
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CHANNEL_ID = "1520386261284688004"; 
 
-const UPDATE_INTERVAL = 30000; // Alle 30 Sekunden prüfen gegen Rate-Limits
+const UPDATE_INTERVAL = 30000; // Alle 30 Sekunden prüfen
 const CHECK_INTERVAL = 10000;  
 const TIMEOUT = 90 * 1000;     
 
@@ -43,7 +43,7 @@ const SUPPORT_ROLE_ID = "1515119690219786250";
 const botStatus = {};
 let panelMessage = null;
 let lastEmbedDescription = ""; 
-let lastSupportState = null; // Speichert, ob zuletzt besetzt (true) oder unbesetzt (false) war
+let lastSupportState = null; 
 
 /* =========================
    API (Bots senden Status hierhin)
@@ -80,7 +80,6 @@ function checkDownBots() {
    EMBED BUILDER LOGIC
 ========================= */
 
-// Gibt zurück, ob mindestens ein Supporter in den Kanälen ist
 function checkSupportStaff() {
   let hasSupportStaff = false;
 
@@ -99,13 +98,12 @@ function checkSupportStaff() {
         }
       }
     } catch (error) {
-      // Fehler ignorieren
+      // Ignorieren
     }
   }
   return hasSupportStaff;
 }
 
-// Generiert den reinen Beschreibungstext
 function generateDescriptionText(hasSupportStaff) {
   const text = Object.entries(botStatus)
     .map(([name, data]) => {
@@ -126,9 +124,8 @@ function generateDescriptionText(hasSupportStaff) {
   return `${text}\n\n---\n\n${supportStatusText}`;
 }
 
-// Baut das Embed mit dynamischer Farbe (Rot = Unbesetzt, Grün = Besetzt)
 function buildEmbed(description, hasSupportStaff) {
-  const embedColor = hasSupportStaff ? 0x00ff00 : 0xff0000; // Grün wenn besetzt, Rot wenn unbesetzt
+  const embedColor = hasSupportStaff ? 0x00ff00 : 0xff0000; 
 
   return new EmbedBuilder()
     .setTitle("📊 Bot Status Panel")
@@ -139,7 +136,7 @@ function buildEmbed(description, hasSupportStaff) {
 }
 
 /* =========================
-   PANEL INITIALISIEREN / BEREINIGEN
+   PANEL INITIALISIEREN
 ========================= */
 
 async function initPanel(channel) {
@@ -149,32 +146,14 @@ async function initPanel(channel) {
   lastEmbedDescription = description;
   lastSupportState = hasStaff;
 
+  // Umgehe das Rate-Limit komplett: Sende IMMER ein neues Panel beim Bot-Start!
   try {
-    const messages = await channel.messages.fetch({ limit: 20 });
-    const oldPanel = messages.find(m => m.author.id === client.user.id && m.embeds.length > 0);
-
-    if (oldPanel) {
-      panelMessage = oldPanel;
-      // Versuche das alte Panel zu editieren
-      await panelMessage.edit({
-        embeds: [buildEmbed(description, hasStaff)]
-      });
-      console.log("🔄 Altes Panel erfolgreich aktualisiert.");
-    } else {
-      throw new Error("Kein altes Panel gefunden, erstelle neues.");
-    }
-  } catch (err) {
-    // Falls das alte Panel blockiert ist (429) oder nicht existiert: Löschen & Neu senden!
-    console.log("⚠️ Altes Panel blockiert oder nicht lesbar. Sende ein komplett neues Panel...");
-    
-    try {
-      if (panelMessage) await panelMessage.delete().catch(() => {});
-    } catch (e) {}
-
     panelMessage = await channel.send({
       embeds: [buildEmbed(description, hasStaff)]
     });
-    console.log("✨ Neues Panel frisch gepostet.");
+    console.log("✨ Neues Panel erfolgreich generiert.");
+  } catch (err) {
+    console.error("Fehler beim Senden des Panels:", err);
   }
 }
 
@@ -188,7 +167,7 @@ async function updatePanel() {
   const hasStaff = checkSupportStaff();
   const currentDescription = generateDescriptionText(hasStaff);
 
-  // Caching: Nur updaten, wenn sich der Text ODER die Farbe (Support-Status) geändert hat!
+  // Greift nur, wenn sich wirklich etwas an den Daten ändert!
   if (currentDescription === lastEmbedDescription && hasStaff === lastSupportState) {
     return; 
   }
@@ -199,12 +178,9 @@ async function updatePanel() {
     });
     lastEmbedDescription = currentDescription;
     lastSupportState = hasStaff;
-    console.log("📝 Panel aktualisiert (Status-Änderung erkannt).");
+    console.log("📝 Panel aktualisiert (Zustandsänderung).");
   } catch (error) {
-    console.error("Fehler beim Editieren, erstelle Panel neu...", error.message);
-    // Bei hartnäckigem Rate-Limit das Panel neu aufbauen
-    const channel = panelMessage.channel;
-    await initPanel(channel);
+    console.error("Fehler beim automatischen Update-Versuch:", error.message);
   }
 }
 
