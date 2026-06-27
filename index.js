@@ -8,7 +8,6 @@ import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
 const app = express();
 app.use(express.json());
 
-// GuildVoiceStates ist notwendig, um Mitglieder in den Sprachkanälen zu sehen
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -21,11 +20,11 @@ const client = new Client({
 ========================= */
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const CHANNEL_ID = "1520386261284688004"; // ID des Textkanals für das Panel
+const CHANNEL_ID = "1520386261284688004"; 
 
-const UPDATE_INTERVAL = 30000; // Panel Update (Alle 30 Sekunden gegen Rate-Limits)
-const CHECK_INTERVAL = 10000;  // Down Check (Alle 10 Sekunden)
-const TIMEOUT = 90 * 1000;     // 90 Sekunden ohne API-Meldung = BOT DOWN
+const UPDATE_INTERVAL = 30000; // Alle 30 Sekunden prüfen
+const CHECK_INTERVAL = 10000;  
+const TIMEOUT = 90 * 1000;     
 
 // HIER DIE 5 IDS DEINER SUPPORT-SPRACHKANÄLE EINTRAGEN
 const SUPPORT_CHANNEL_IDS = [
@@ -35,7 +34,7 @@ const SUPPORT_CHANNEL_IDS = [
   "KANAL_ID_4",
   "KANAL_ID_5"
 ];
-const SUPPORT_ROLE_ID = "1515119690219786250"; // ID der Support-Rolle
+const SUPPORT_ROLE_ID = "1515119690219786250"; 
 
 /* =========================
    STORAGE
@@ -43,7 +42,7 @@ const SUPPORT_ROLE_ID = "1515119690219786250"; // ID der Support-Rolle
 
 const botStatus = {};
 let panelMessage = null;
-let lastEmbedDescription = ""; // Speichert den letzten Textzustand (Intelligentes Caching)
+let lastEmbedDescription = ""; // Caching-Variable für den reinen Text-Vergleich
 
 /* =========================
    API (Bots senden Status hierhin)
@@ -80,9 +79,8 @@ function checkDownBots() {
    EMBED BUILDER LOGIC
 ========================= */
 
-// Generiert den reinen Textinhalt für das Embed
+// Generiert NUR den reinen Textinhalt (ohne Zeitstempel) für den exakten Vergleich
 function generateDescriptionText() {
-  // 1. Bots auflisten
   const text = Object.entries(botStatus)
     .map(([name, data]) => {
       const emoji =
@@ -95,7 +93,6 @@ function generateDescriptionText() {
     })
     .join("\n") || "Keine Daten";
 
-  // 2. Die 5 Support-Kanäle prüfen
   let hasSupportStaff = false;
 
   for (const channelId of SUPPORT_CHANNEL_IDS) {
@@ -109,11 +106,11 @@ function generateDescriptionText() {
 
         if (staffInChannel) {
           hasSupportStaff = true;
-          break; // Einer gefunden, Schleife abbrechen
+          break; 
         }
       }
     } catch (error) {
-      // Fehler silent abfangen, falls ein Kanal mal nicht im Cache ist
+      // Fehler ignorieren
     }
   }
 
@@ -124,27 +121,40 @@ function generateDescriptionText() {
   return `${text}\n\n---\n\n${supportStatusText}`;
 }
 
-// Baut das finale Embed-Objekt
+// Baut das Embed und setzt den Zeitstempel NUR bei echtem Update
 function buildEmbed(description) {
   return new EmbedBuilder()
     .setTitle("📊 Bot Status Panel")
     .setColor(0x00ff00)
     .setDescription(description)
-    .setFooter({ text: "Auto-Update aktiv" })
-    .setTimestamp();
+    .setFooter({ text: "Letztes Status-Update" })
+    .setTimestamp(); // Zeitstempel wird jetzt fixiert für diese Version generiert
 }
 
 /* =========================
-   PANEL ERSTELLEN
+   PANEL INITIALISIEREN / BEREINIGEN
 ========================= */
 
-async function createPanel(channel) {
+async function initPanel(channel) {
   const description = generateDescriptionText();
-  lastEmbedDescription = description; // Start-Zustand merken
+  lastEmbedDescription = description;
 
-  panelMessage = await channel.send({
-    embeds: [buildEmbed(description)]
-  });
+  // Letzte 20 Nachrichten holen und alte Panels löschen, um Spam zu vermeiden
+  const messages = await channel.messages.fetch({ limit: 20 });
+  const oldPanel = messages.find(m => m.author.id === client.user.id && m.embeds.length > 0);
+
+  if (oldPanel) {
+    panelMessage = oldPanel;
+    await panelMessage.edit({
+      embeds: [buildEmbed(description)]
+    });
+    console.log("🔄 Altes Panel gefunden und aktualisiert.");
+  } else {
+    panelMessage = await channel.send({
+      embeds: [buildEmbed(description)]
+    });
+    console.log("✨ Neues Panel gepostet.");
+  }
 }
 
 /* =========================
@@ -156,4 +166,55 @@ async function updatePanel() {
 
   const currentDescription = generateDescriptionText();
 
-  // INTELLIGENTES CACH
+  // STRENGER VERGLEICH: Wenn der Text exakt identisch ist, brechen wir SOFORT ab!
+  if (currentDescription === lastEmbedDescription) {
+    return; 
+  }
+
+  try {
+    await panelMessage.edit({
+      embeds: [buildEmbed(currentDescription)]
+    });
+    lastEmbedDescription = currentDescription; // Cache aktualisieren
+    console.log("📝 Panel erfolgreich aktualisiert, da sich ein Status geändert hat.");
+  } catch (error) {
+    console.error("Fehler beim Editieren des Panels:", error);
+  }
+}
+
+/* =========================
+   DISCORD READY
+========================= */
+
+client.once("ready", async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+
+  try {
+    const channel = await client.channels.fetch(CHANNEL_ID);
+    await initPanel(channel);
+  } catch (err) {
+    console.error("Kanal konnte nicht geladen werden:", err);
+  }
+
+  setInterval(() => {
+    checkDownBots();
+  }, CHECK_INTERVAL);
+
+  setInterval(() => {
+    updatePanel();
+  }, UPDATE_INTERVAL);
+});
+
+/* =========================
+   START SERVER
+========================= */
+
+app.listen(3000, () => {
+  console.log("🚀 API läuft auf Port 3000");
+});
+
+/* =========================
+   LOGIN
+========================= */
+
+client.login(DISCORD_TOKEN);
