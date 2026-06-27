@@ -2,6 +2,7 @@ import discord
 from discord.ext import tasks
 import os
 import asyncio
+import datetime
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -26,6 +27,9 @@ bot = discord.Client(intents=intents)
 
 panel_message: discord.Message | None = None
 
+# INTELLIGENTES CACHING: Speichert den letzten Zustand der Belegung
+last_occupied_state = None
+
 
 def check_channel_occupied(channel: discord.VoiceChannel, role_id: int) -> bool:
     for member in channel.members:
@@ -34,28 +38,9 @@ def check_channel_occupied(channel: discord.VoiceChannel, role_id: int) -> bool:
     return False
 
 
-def build_embed(guild: discord.Guild) -> discord.Embed:
-    occupied = []
-    free = []
-
-    lines = []
-    for ch_id in VOICE_CHANNEL_IDS:
-        channel = guild.get_channel(ch_id)
-        if channel is None:
-            lines.append(f"⚠️ Kanal `{ch_id}` nicht gefunden")
-            continue
-
-        is_occupied = check_channel_occupied(channel, ROLE_ID)
-        status = "🔴 Belegt" if is_occupied else "🟢 Frei"
-        lines.append(f"**{channel.name}** — {status}")
-
-        if is_occupied:
-            occupied.append(ch_id)
-        else:
-            free.append(ch_id)
-
+def build_embed(guild: discord.Guild, occupied_list: list, free_list: list, lines: list) -> discord.Embed:
     total = len([ch_id for ch_id in VOICE_CHANNEL_IDS if guild.get_channel(ch_id) is not None])
-    num_occupied = len(occupied)
+    num_occupied = len(occupied_list)
 
     if num_occupied == 0:
         ampel = "🟢 GRÜN — Alle Kanäle frei"
@@ -78,9 +63,7 @@ def build_embed(guild: discord.Guild) -> discord.Embed:
         value=f"{num_occupied} / {total} Kanäle belegt",
         inline=False,
     )
-    embed.set_footer(text="Aktualisiert alle 3 Sekunden")
-
-    import datetime
+    embed.set_footer(text="Auto-Update aktiv")
     embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
 
     return embed
@@ -94,44 +77,105 @@ async def on_ready():
 
 
 async def find_or_create_panel():
-    global panel_message
+    global panel_message, last_occupied_state
 
     text_channel = bot.get_channel(PANEL_TEXT_CHANNEL_ID)
     if text_channel is None:
         print(f"FEHLER: Text-Kanal {PANEL_TEXT_CHANNEL_ID} nicht gefunden.")
         return
 
+    # Zustand ermitteln für den ersten Start
+    guild = text_channel.guild
+    occupied = []
+    free = []
+    lines = []
+    
+    for ch_id in VOICE_CHANNEL_IDS:
+        channel = guild.get_channel(ch_id)
+        if channel is None:
+            lines.append(f"⚠️ Kanal `{ch_id}` nicht gefunden")
+            continue
+        is_occupied = check_channel_occupied(channel, ROLE_ID)
+        status = "🔴 Belegt" if is_occupied else "🟢 Frei"
+        lines.append(f"**{channel.name}** — {status}")
+        if is_occupied:
+            occupied.append(ch_id)
+        else:
+            free.append(ch_id)
+            
+    last_occupied_state = sorted(occupied)
+
+    # Nach alter Nachricht suchen
     async for msg in text_channel.history(limit=50):
         if msg.author == bot.user and msg.embeds:
             embed = msg.embeds[0]
             if embed.title and "Sprachkanal-Status" in embed.title:
                 panel_message = msg
-                print(f"Vorhandene Panel-Nachricht gefunden (ID: {msg.id}), wird editiert.")
+                print(f"Vorhandene Panel-Nachricht gefunden (ID: {msg.id}), wird initial editiert.")
+                try:
+                    # Einmalig beim Start updaten, falls blockiert fängt es der Try-Block ab
+                    embed_obj = build_embed(guild, occupied, free, lines)
+                    await panel_message.edit(embed=embed_obj)
+                except discord.HTTPException:
+                    print("⚠️ Altes Panel temporär von Discord rate-limited. Warte auf Freigabe...")
                 return
 
-    guild = text_channel.guild
-    embed = build_embed(guild)
-    panel_message = await text_channel.send(embed=embed)
+    embed_obj = build_embed(guild, occupied, free, lines)
+    panel_message = await text_channel.send(embed=embed_obj)
     print(f"Neue Panel-Nachricht erstellt (ID: {panel_message.id}).")
 
 
-@tasks.loop(seconds=3)
+# Intervall auf 15 Sekunden erhöht gegen Rate-Limits
+@tasks.loop(seconds=15)
 async def update_panel():
-    global panel_message
+    global panel_message, last_occupied_state
 
     if panel_message is None:
         return
 
     try:
         guild = panel_message.guild
-        embed = build_embed(guild)
+        occupied = []
+        free = []
+        lines = []
+
+        # Aktuelle Belegung prüfen
+        for ch_id in VOICE_CHANNEL_IDS:
+            channel = guild.get_channel(ch_id)
+            if channel is None:
+                lines.append(f"⚠️ Kanal `{ch_id}` nicht gefunden")
+                continue
+
+            is_occupied = check_channel_occupied(channel, ROLE_ID)
+            status = "🔴 Belegt" if is_occupied else "🟢 Frei"
+            lines.append(f"**{channel.name}** — {status}")
+
+            if is_occupied:
+                occupied.append(ch_id)
+            else:
+                free.append(ch_id)
+
+        current_occupied_state = sorted(occupied)
+
+        # INTELLIGENTES CACHING: Nur editieren, wenn sich die Liste der belegten Kanäle geändert hat!
+        if current_occupied_state == last_occupied_state:
+            return
+
+        embed = build_embed(guild, occupied, free, lines)
         await panel_message.edit(embed=embed)
+        last_occupied_state = current_occupied_state
+        print("📝 Panel aktualisiert (Belegungsänderung erkannt).")
+        
     except discord.NotFound:
         print("Panel-Nachricht wurde gelöscht. Erstelle neue...")
         panel_message = None
         await find_or_create_panel()
     except discord.HTTPException as e:
-        print(f"HTTP-Fehler beim Editieren: {e}")
+        # Falls es ein 429 ist, fängt der Bot es hier ab ohne das Log vollzuspammen
+        if e.status == 429:
+            pass
+        else:
+            print(f"HTTP-Fehler beim Editieren: {e}")
     except Exception as e:
         print(f"Unerwarteter Fehler: {e}")
 
