@@ -6,9 +6,10 @@ import datetime
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# ROLLEN-IDS
-USER_NEED_HELP_ROLE_ID = 1514285810889916426  # User / Bürger braucht Hilfe
+# CONFIG-IDS
+USER_NEED_HELP_ROLE_ID = 1514285810889916426  # Wird nur noch für Support-Kanäle 1-5 genutzt
 TEAM_ROLE_ID = 1515119690219786250            # Support-Teammitglied
+MY_BOT_ID = 1519011268764373033               # ID deines Bots (wird ignoriert)
 
 # KANÄLE
 WARTERAUM_ID = 1512120421007495248            
@@ -30,8 +31,8 @@ last_state_hash = ""
 
 # LIVE-SPEICHER & HISTORIE
 warteraum_join_times = {}
-recent_wait_times = []  # Speichert die Sekunden der letzten X Support-Fälle
-GLOBAL_AVERAGE_TEXT = "0 Sek."  # Behält den letzten Wert im Speicher
+recent_wait_times = []  
+GLOBAL_AVERAGE_TEXT = "0 Sek."  
 
 
 def get_channel_status(channel: discord.VoiceChannel) -> str:
@@ -40,6 +41,9 @@ def get_channel_status(channel: discord.VoiceChannel) -> str:
     has_user = False
 
     for member in channel.members:
+        if member.id == MY_BOT_ID:
+            continue
+            
         member_roles = [r.id for r in member.roles]
         if TEAM_ROLE_ID in member_roles:
             has_team = True
@@ -56,25 +60,38 @@ def get_channel_status(channel: discord.VoiceChannel) -> str:
         return "⚪ Unbesetzt (Niemand drin)"
 
 
+def get_warteraum_user_count(warteraum: discord.VoiceChannel) -> int:
+    """Zählt ALLE echten User im Warteraum (ignoriert nur deinen Bot)."""
+    if not warteraum:
+        return 0
+    count = 0
+    for member in warteraum.members:
+        if member.id != MY_BOT_ID:  # JEDER außer der Bot wird gezählt
+            count += 1
+    return count
+
+
 def update_average_wait_time(guild: discord.Guild):
-    """Berechnet die durchschnittliche Wartezeit und hält sie im Speicher."""
+    """Berechnet die durchschnittliche Wartezeit für alle echten User."""
     global GLOBAL_AVERAGE_TEXT
     
     warteraum = guild.get_channel(WARTERAUM_ID)
     now = datetime.datetime.now(datetime.timezone.utc)
     
-    # Fall A: Es befinden sich aktuell User im Warteraum -> Nutze Live-Daten
-    if warteraum and any(USER_NEED_HELP_ROLE_ID in [r.id for r in m.roles] for m in warteraum.members):
+    live_user_count = get_warteraum_user_count(warteraum)
+    
+    # Fall A: Jemand ist im Warteraum -> Live-Daten nutzen
+    if live_user_count > 0:
         total_wait_seconds = 0
         count = 0
         for member in warteraum.members:
-            if USER_NEED_HELP_ROLE_ID in [r.id for r in member.roles]:
+            if member.id != MY_BOT_ID:
                 join_time = warteraum_join_times.get(member.id, now)
                 total_wait_seconds += max(0, (now - join_time).total_seconds())
                 count += 1
         avg_seconds = total_wait_seconds / count
 
-    # Fall B: Warteraum ist leer -> Nutze den Durchschnitt der letzten abgeholten User
+    # Fall B: Warteraum leer -> Letzten gespeicherten Durchschnitt nutzen
     elif recent_wait_times:
         avg_seconds = sum(recent_wait_times) / len(recent_wait_times)
     else:
@@ -98,10 +115,9 @@ def build_embed(guild: discord.Guild, lines: list, any_team_online: bool) -> dis
         ampel = "🔴 OFFLINE — Zurzeit kein Supporter im Dienst"
         color = discord.Color.red()
 
-    # Holt den gespeicherten/aktuellen Durchschnittstext
     update_average_wait_time(guild)
     warteraum = guild.get_channel(WARTERAUM_ID)
-    warteraum_count = len(warteraum.members) if warteraum else 0
+    warteraum_count = get_warteraum_user_count(warteraum)
 
     embed = discord.Embed(
         title="🎙️ BRP Support-Verfügbarkeit",
@@ -112,7 +128,7 @@ def build_embed(guild: discord.Guild, lines: list, any_team_online: bool) -> dis
     embed.add_field(name="⏳ Warteraum Wartezeit (Ø)", value=GLOBAL_AVERAGE_TEXT, inline=True)
     embed.add_field(name="👥 User im Warteraum", value=f"{warteraum_count} User", inline=True)
 
-    embed.set_footer(text="Auto-Update aktiv (Sekundengenaue Messung)")
+    embed.set_footer(text="Auto-Update aktiv (Alle User werden gemessen)")
     embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
 
     return embed
@@ -128,7 +144,7 @@ async def on_ready():
         if warteraum:
             now = datetime.datetime.now(datetime.timezone.utc)
             for member in warteraum.members:
-                if USER_NEED_HELP_ROLE_ID in [r.id for r in member.roles]:
+                if member.id != MY_BOT_ID:
                     warteraum_join_times[member.id] = now
 
     await find_or_create_panel()
@@ -137,28 +153,28 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    """Überwacht live Beitritte und berechnet beim Verlassen die historische Wartezeit."""
+    """Überwacht jeden Beitritt im Warteraum komplett ohne Rollenzwang."""
     global recent_wait_times
+    
+    if member.id == MY_BOT_ID:
+        return
+        
     now = datetime.datetime.now(datetime.timezone.utc)
     
     # User betritt den Warteraum
     if after.channel and after.channel.id == WARTERAUM_ID:
-        if USER_NEED_HELP_ROLE_ID in [r.id for r in member.roles]:
-            if member.id not in warteraum_join_times:
-                warteraum_join_times[member.id] = now
+        if member.id not in warteraum_join_times:
+            warteraum_join_times[member.id] = now
             
-    # User verlässt den Warteraum (wird z.B. vom Dispatcher verschoben)
+    # User verlässt den Warteraum
     if before.channel and before.channel.id == WARTERAUM_ID:
         if after.channel is None or after.channel.id != WARTERAUM_ID:
             join_time = warteraum_join_times.pop(member.id, None)
             
-            # Wenn er die Bürger-Rolle hatte, loggen wir seine echte Wartezeit in die Historie ein
-            if join_time and USER_NEED_HELP_ROLE_ID in [r.id for r in member.roles]:
+            if join_time:
                 wait_duration = (now - join_time).total_seconds()
-                # Nur loggen, wenn er länger als 1 Sekunde drin war (gegen Fehlsprünge)
-                if wait_duration > 1:
+                if wait_duration >= 1:  
                     recent_wait_times.append(wait_duration)
-                    # Wir behalten nur die letzten 10 Support-Fälle für einen aktuellen Durchschnitt
                     if len(recent_wait_times) > 10:
                         recent_wait_times.pop(0)
 
@@ -186,11 +202,11 @@ async def find_or_create_panel():
         state_str += f"{ch_id}:{status}|"
         
         if "🟢 Frei" in status or "Besetzt" in status:
-            if any(TEAM_ROLE_ID in [r.id for r in m.roles] for m in channel.members):
+            if any(TEAM_ROLE_ID in [r.id for r in m.roles] for m in channel.members if m.id != MY_BOT_ID):
                 any_team_online = True
 
     warteraum = guild.get_channel(WARTERAUM_ID)
-    state_str += f"w:{len(warteraum.members) if warteraum else 0}"
+    state_str += f"w:{get_warteraum_user_count(warteraum)}"
     last_state_hash = state_str
 
     async for msg in text_channel.history(limit=50):
@@ -233,13 +249,12 @@ async def update_panel():
             state_str += f"{ch_id}:{status}|"
 
             if "🟢 Frei" in status or "Besetzt" in status:
-                if any(TEAM_ROLE_ID in [r.id for r in m.roles] for m in channel.members):
+                if any(TEAM_ROLE_ID in [r.id for r in m.roles] for m in channel.members if m.id != MY_BOT_ID):
                     any_team_online = True
 
         warteraum = guild.get_channel(WARTERAUM_ID)
-        warteraum_count = len(warteraum.members) if warteraum else 0
+        warteraum_count = get_warteraum_user_count(warteraum)
         
-        # Den aktuellen Durchschnitt berechnen, damit er in den Cache-String fließt
         update_average_wait_time(guild)
         state_str += f"w:{warteraum_count}|time:{GLOBAL_AVERAGE_TEXT}"
 
@@ -249,7 +264,7 @@ async def update_panel():
         embed = build_embed(guild, lines, any_team_online)
         await panel_message.edit(embed=embed)
         last_state_hash = state_str
-        print("📝 Panel aktualisiert (Durchschnitt gehalten).")
+        print("📝 Panel aktualisiert (Jeder User wird erfasst).")
         
     except discord.NotFound:
         panel_message = None
